@@ -16,7 +16,7 @@ namespace Sce.Solution.TriggerConditionalApprovalCJO
         public string analyticsGuid { get; set; }
         public string cjoName { get; set; }
     }
-    
+
     public class TriggerConditionalApprovalCJOPlugin : IPlugin
     {
         public async void Execute(IServiceProvider serviceProvider)
@@ -43,21 +43,27 @@ namespace Sce.Solution.TriggerConditionalApprovalCJO
                 {
                     //tracingService.Trace("Started");
                     var newOpportunity = (Entity)context.InputParameters["Target"];
-                    Money newAmount = newOpportunity.Contains("sce_approved_amount")?(Money)newOpportunity["sce_approved_amount"]:null;
-                    OptionSetValue newStatus = newOpportunity.Contains("sce_applicationstatus") ?(OptionSetValue)newOpportunity["sce_applicationstatus"]:null;
+                    Money newAmount = newOpportunity.Contains("sce_approved_amount") ? (Money)newOpportunity["sce_approved_amount"] : null;
+                    OptionSetValue newStatus = newOpportunity.Contains("sce_applicationstatus") ? (OptionSetValue)newOpportunity["sce_applicationstatus"] : null;
                     //tracingService.Trace("Get Opportunity");
                     Entity existOpportunity = (Entity)context.PreEntityImages["opportunity"];
-                    NotificationType notificationType = GetNotificationType(newAmount, newStatus,existOpportunity);
+                    NotificationType notificationType = GetNotificationType(newAmount, newStatus, existOpportunity);
 
-                    if (notificationType!=NotificationType.None)
+                    if (notificationType != NotificationType.None)
                     {
                         //tracingService.Trace("before get All lead");
                         EntityCollection allLeads = GetApplicationLeads(context.PrimaryEntityId, service);
                         //tracingService.Trace("before trigger CJO");
-                        TriggerCJO(notificationType, allLeads,existOpportunity, service, tracingService);
+                        
+                        //Official way
+                        //TriggerCJO(notificationType, allLeads, existOpportunity, service, tracingService);
+
+                        //Prefer
+                        TriggerCJO_CustomAPI(allLeads,existOpportunity, service, tracingService);
+                        
                     }
-                    
-       
+
+
                 }
 
                 catch (FaultException<OrganizationServiceFault> ex)
@@ -88,7 +94,42 @@ namespace Sce.Solution.TriggerConditionalApprovalCJO
             return results;
         }
 
-        private void TriggerCJO(NotificationType notificationType, EntityCollection leads,Entity oppo, IOrganizationService svc, ITracingService trace)
+        private void TriggerCJO_CustomAPI(EntityCollection leads, Entity oppo, IOrganizationService svc, ITracingService trace)
+        {
+            trace.Trace(DateTime.Now.ToString());
+            CJOTriggers cjoDetail = GetCJOTriggersDetail(svc, "sce__ConditionalApproveCJODetail");
+
+            foreach (var lead in leads.Entities)
+            {
+                var req = new OrganizationRequest(cjoDetail.cjoName)
+                {
+                    //Mandatory property
+                    ["msdynmkt_signalingestiontimestamp"] = DateTime.Now,
+                    ["msdynmkt_signaltimestamp"] = DateTime.Now,
+                    ["msdynmkt_signaluserauthid"] = lead.Id.ToString(),
+                    ["msdynmkt_profileid"] = lead.Id.ToString(),
+
+                    //Custom Properties
+                    ["msdynmkt_datevariable"] = DateTime.Now,
+                    ["msdynmkt_opportunity"] = new EntityReference("opportunity", oppo.Id),
+                    ["msdynmkt_textvariable1"] = "N/A",
+                    ["msdynmkt_textvariable2"] = "N/A",
+                    ["msdynmkt_textvariable3"] = "N/A",
+                    ["msdynmkt_textvariable4"] = "N/A"
+                };
+
+                try
+                {
+                    OrganizationResponse resp = svc.Execute(req);
+                }
+                catch (Exception ex)
+                {
+                    trace.Trace("ApprovalTrigerError: {0}", ex.Message);
+
+                }
+            }
+        }
+        private void TriggerCJO(NotificationType notificationType, EntityCollection leads, Entity oppo, IOrganizationService svc, ITracingService trace)
         {
             trace.Trace("TriggerCJO started");
             CJOTriggers cjoDetail = GetCJOTriggersDetail(svc, "sce__ConditionalApproveCJODetail");
@@ -119,7 +160,7 @@ namespace Sce.Solution.TriggerConditionalApprovalCJO
             }
         }
 
-        private CJOTriggers GetCJOTriggersDetail(IOrganizationService svc,string variableName)
+        private CJOTriggers GetCJOTriggersDetail(IOrganizationService svc, string variableName)
         {
             Dictionary<string, string> envVariables = new Dictionary<string, string>();
 
@@ -143,7 +184,7 @@ namespace Sce.Solution.TriggerConditionalApprovalCJO
                         }
             };
 
-            query.Criteria.AddCondition("schemaname", ConditionOperator.Equal, variableName); 
+            query.Criteria.AddCondition("schemaname", ConditionOperator.Equal, variableName);
             var results = svc.RetrieveMultiple(query);
             if (results?.Entities.Count > 0)
             {
@@ -159,31 +200,20 @@ namespace Sce.Solution.TriggerConditionalApprovalCJO
             }
 
             CJOTriggers triggerDetail = JsonConvert.DeserializeObject<CJOTriggers>(envVariables[variableName]);
-            
+
             return triggerDetail;
-        
+
         }
 
         private NotificationType GetNotificationType(Money newAmount, OptionSetValue status, Entity existOpportunity)
         {
 
             Money oldAmount = existOpportunity.Contains("sce_financial_conditionally_approved_amount") ? (Money)existOpportunity["sce_financial_conditionally_approved_amount"] : null;
-            var cstatus = status==null ? (OptionSetValue)existOpportunity["sce_applicationstatus"] : status;
-            //Conditionally Approved = 8
-            //Pending Conditionally Approved = 9
-            //Conditionally Declined = 10
-            //Approved = 3
-            //Accepted = 4
-            if ( cstatus.Value == 8)
+            var cstatus = status == null ? (OptionSetValue)existOpportunity["sce_applicationstatus"] : status;
+            if (cstatus.Value == 8)
             {
-                if (newAmount.Value.Equals(oldAmount.Value) || newAmount==null)
-                {
-                    return NotificationType.None;
-                }
-                else
-                {
-                   return  oldAmount ==null?NotificationType.ConditionalApproved : NotificationType.ConditionalApprovedUpdated;
-                }
+                return oldAmount == null ? NotificationType.ConditionalApproved : NotificationType.ConditionalApprovedUpdated;
+             
             }
             else
             {
